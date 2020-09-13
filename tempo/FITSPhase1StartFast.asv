@@ -1,0 +1,328 @@
+function FITSPhase1StartFast(unimpData,msc,aRFSR,name2save,num)
+   maxAllowedLevel = 4;
+   maxClusters = 4;
+    unimpData=log(unimpData+1.01);
+    [ux,uy] = size(unimpData);
+    rng shuffle;
+    rank = randi([3,6]);
+    Xrec = istCalc(unimpData,rank);
+    final_imputed = Xrec;
+    save(strcat(name2save,'_r_',num2str(rank),'.mat'),'final_imputed','-v7.3');
+    impData = Xrec;
+    clear final_imputed;
+    clear Xrec;
+    RFSR=aRFSR;
+    level = 1;
+    flag=1;
+    clusters = struct;
+    records = struct;
+    cluster = maxClusters; % help in keeping track of maxclusters allowed in each level
+    %class(maxAllowedLevel)
+    allowedLevel = randi([2,maxAllowedLevel]); 
+    
+    %For level 1
+    level_1_cluster = clusterCount(cluster);
+    while 1
+        predictedLabel=kclusters(impData,level_1_cluster,RFSR);
+        %%Data Check function should be implemented here
+        flag = checkClustersMinCount(predictedLabel,level_1_cluster,msc);
+        if flag~=0
+            break;
+        else
+            level_1_cluster=level_1_cluster-1;
+        end
+    end
+    parfor i = 1:level_1_cluster
+        c(i).val = find(predictedLabel==i);
+        unimpdata(i).val = unimpData(c(i).val,:);
+        vec(i).val = find(~any(unimpdata(i).val, 1));
+    end
+            parfor i = 1:clusters(level).val
+                records(level).c(i).val = find(records(level).predictedLabel==i);
+                records(level).unimpdata(i).val = unimpData(records(level).c(i).val,:);
+                records(level).vec(i).val = find(~any(records(level).unimpdata(i).val, 1));%vector for every data to know column/sites indices having all zero
+                records(level).data(i).val = records(level).unimpdata(i).val; %making duplicate matrix
+                records(level).data(i).val(:,records(level).vec(i).val) = []; %delete columns having all zero
+                disp('half done')
+                i
+                records(level).unimpdata(i).filename = strcat(name2save,'_unimpdata_level_',num2str(level),'_i_',num2str(i)); 
+                records(level).unimpdata(i).val = dumpData(records(level).unimpdata(i).filename,records(level).unimpdata(i).val,1);
+                
+                [records(level).data(i).val records(level).vec(i).val] = operationOnMatrix(records(level).data(i).val,rank,impData,records(level).c(i).val,records(level).vec(i).val,records(level).vec(i).val);% impute new clustered data
+                
+                records(level).data(i).filename = strcat(name2save,'_impdata_level_',num2str(level),'_i_',num2str(i)); 
+                records(level).data(i).val = dumpData(records(level).data(i).filename,records(level).data(i).val,1);
+            end
+            clear impData;
+            clear unimpData;
+            records(level).predictedLabel = 0;
+
+     
+end
+
+function  z = istCalc(matrix,rank)
+        N1 = numel(matrix);
+        %t1 = 1:N1;
+        IDX1 =find(matrix>0);
+        M1 = opRestriction(N1,IDX1);
+        clear N1;
+        clear IDX1;
+        %y1 = M1(matrix(:),1);
+        z = IST_eMC( M1(matrix(:),1),M1,size(matrix), rank); 
+end
+function plabels = kclusters(matrix,k,RFSR)
+    random_vec = randperm(size(matrix,2));
+    r=randi(RFSR)/100;
+    val = size(matrix,2)-int32(size(matrix,2)*r);
+    matrix(:,random_vec(1:val)) = [];
+    %[matrix, mapping] = compute_mapping(matrix, 'PCA',8)
+    [m,n] = size(matrix);
+    if ~(10 <= m && 10 <= n)
+       disp('');
+    else
+       [U,S,V] = svdsecon(matrix,10);
+       [matrix, mapping] = compute_mapping(U, 'tSNE',randi([3,6]));
+    end
+    loc=randperm(size(matrix,1),k);
+    init =matrix(loc,:);
+    plabels=kmeans(matrix,k,'MaxIter',1000,'Start',init);
+end 
+function v = clusterCount(maxk)
+    val=randperm(maxk);
+    v=val(1);
+    if v<2
+        v=2;
+    end
+end
+
+function [toreturn updatedvec] = operationOnMatrix(matrix,rank,impmatrix,rows,newVec,oldVec)
+    if size(matrix,1)>=rank
+        toreturn = istCalc(matrix,rank);
+        updatedvec = newVec;
+    else
+        toreturn = impmatrix(rows,:);
+        updatedvec = oldVec;
+    end
+end
+
+function predictedLabel = clusterPrediction(startLevel,endLevel,clusters,data,RFSR)
+    predictedLabel = struct;
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+        	loaded_data = loadData(data(i).filename, 0, 0);
+            predictedLabel(i).val= kclusters(loaded_data,clusters(endLevel).val,RFSR);
+            
+        else
+            predictedLabel(i).predictedLabel=struct;
+            predictedLabel(i).predictedLabel=clusterPrediction(startLevel+1,endLevel,clusters,data(i).data,RFSR);
+        end 
+    end
+end
+
+function c = clusterMaking(startLevel,endLevel,clusters,predictedLabel)
+    c = struct;
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            for m = 1:clusters(endLevel).val
+                c(i).c(m).val= find(predictedLabel(i).val==m);
+            end
+        else
+            c(i).c=struct;
+            c(i).c=clusterMaking(startLevel+1,endLevel,clusters,predictedLabel(i).predictedLabel);
+        end 
+    end
+end
+
+%original data and their labels in 8 clusters
+function unimpdata = rawDataClusterMaking(startLevel,endLevel,clusters,unimpdata,c)
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            unimpdata(i).val = loadData(unimpdata(i).filename, 0, 0);
+            for m = 1:clusters(endLevel).val
+                unimpdata(i).unimpdata(m).val= unimpdata(i).val(c(i).c(m).val,:);
+                unimpdata(i).unimpdata(m).filename = strcat(unimpdata(i).filename,'_level_',num2str(endLevel),'_i_',num2str(m)); 
+                unimpdata(i).unimpdata(m).val = dumpData(unimpdata(i).unimpdata(m).filename,unimpdata(i).unimpdata(m).val,1);
+            end
+            unimpdata(i).val = 0;
+        else
+            unimpdata(i).unimpdata=rawDataClusterMaking(startLevel+1,endLevel,clusters,unimpdata(i).unimpdata,c(i).c);
+        end 
+    end
+end
+
+%vector for every data to know column/sites indices having all zero
+function vec = vecFormation(startLevel,endLevel,clusters,unimpdata)
+    vec = struct;
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            for m = 1:clusters(endLevel).val
+            	loaded_data = loadData(unimpdata(i).unimpdata(m).filename, 0, 0);
+                vec(i).vec(m).val= find(~any(loaded_data, 1));
+            end
+        else
+            vec(i).vec=struct;
+            vec(i).vec=vecFormation(startLevel+1,endLevel,clusters,unimpdata(i).unimpdata);
+        end 
+    end
+end
+
+%making duplicate matrix
+%delete columns having all zero
+function data = dataFormation(startLevel,endLevel,clusters,unimpdata,vec,data)
+    %data = struct;
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            for m = 1:clusters(endLevel).val
+            	loaded_data = loadData(unimpdata(i).unimpdata(m).filename, 0, 0);
+                data(i).data(m).val= loaded_data;
+                data(i).data(m).val(:,vec(i).vec(m).val)=[];
+                data(i).data(m).filename = strcat(data(i).filename,'_level_',num2str(endLevel),'_i_',num2str(m)); 
+                data(i).data(m).val = dumpData(data(i).data(m).filename,data(i).data(m).val,1);
+            end
+        else
+            %data(i).data=struct;
+            data(i).data=dataFormation(startLevel+1,endLevel,clusters,unimpdata(i).unimpdata,vec(i).vec, data(i).data);
+        end 
+    end
+end
+
+function [data vec] = imputationOperation(rank,startLevel,endLevel,clusters,data,impdata,vec,oldvec,c)
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            for m = 1:clusters(endLevel).val
+            	loaded_data = loadData(data(i).data(m).filename, 0, 0);
+            	loaded_data_imp = loadData(impdata(i).filename, 0, 0);
+                [data(i).data(m).val vec(i).vec(m).val]= operationOnMatrix(loaded_data,rank,loaded_data_imp,c(i).c(m).val,vec(i).vec(m).val,oldvec(i).val);
+                data(i).data(m).filename = strcat(data(i).filename,'_level_',num2str(endLevel),'_i_',num2str(m)); 
+                data(i).data(m).val = dumpData(data(i).data(m).filename,data(i).data(m).val,1);
+            end
+        else
+            [data(i).data vec(i).vec]=imputationOperation(rank,startLevel+1,endLevel,clusters,data(i).data,impdata(i).data,vec(i).vec,oldvec(i).vec,c(i).c);
+        end 
+    end
+end
+
+function newdata = newdataInitialization(startLevel,endLevel,clusters,data,dataX_column_size)
+    newdata = struct;
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            for m = 1:clusters(endLevel).val
+            	row_size = loadData(data(i).data(m).filename, 1, 0);
+                newdata(i).newdata(m).val= zeros(row_size,dataX_column_size);
+                newdata(i).newdata(m).filename = strcat(data(i).data(m).filename,'_newdata'); 
+                newdata(i).newdata(m).val = dumpData(newdata(i).newdata(m).filename,newdata(i).newdata(m).val,1);
+            end
+        else
+            newdata(i).newdata=struct;
+            newdata(i).newdata=newdataInitialization(startLevel+1,endLevel,clusters,data(i).data,dataX_column_size);
+        end 
+    end
+    
+end 
+
+function vec_negation = vec_negationInitialization(startLevel,endLevel,clusters,vec,dataX_column_size)
+    vec_negation = struct;
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            for m = 1:clusters(endLevel).val
+                vec_negation(i).vec_negation(m).val=  1:dataX_column_size;
+                vec_negation(i).vec_negation(m).val(vec(i).vec(m).val)=[];
+                     
+            end
+        else
+            vec_negation(i).vec_negation=struct;
+            vec_negation(i).vec_negation=vec_negationInitialization(startLevel+1,endLevel,clusters,vec(i).vec,dataX_column_size);
+        end 
+    end
+    
+end 
+
+function newdata = newdataMaking(startLevel,endLevel,clusters,newdata,vec_negation,data)
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+            for m = 1:clusters(endLevel).val
+            	loaded_data = loadData(data(i).data(m).filename, 0, 0);
+            	newdata(i).newdata(m).val = loadData(newdata(i).newdata(m).filename, 0, 0);
+                newdata(i).newdata(m).val(:,vec_negation(i).vec_negation(m).val) = loaded_data;
+                newdata(i).newdata(m).val = dumpData(newdata(i).newdata(m).filename,newdata(i).newdata(m).val,1);
+            end
+        else
+            newdata(i).newdata=newdataMaking(startLevel+1,endLevel,clusters,newdata(i).newdata,vec_negation(i).vec_negation,data(i).data);
+        end 
+    end
+end
+
+function newdata = newdataMerging(startLevel,endLevel,clusters,newdata,data,c,dataX_column_size)
+    for i = 1:clusters(startLevel).val
+        if startLevel == endLevel-1
+        	row_size = loadData(data(i).filename, 1, 0);
+            newdata(i).val = zeros(row_size,dataX_column_size);
+            for m = 1:clusters(endLevel).val
+            	loaded_data = loadData(newdata(i).newdata(m).filename, 0, 1); %matrix deleted here
+                newdata(i).val(transpose(c(i).c(m).val),:) = loaded_data;
+            end
+            newdata(i).filename = strcat(data(i).filename,'_newdata'); 
+            newdata(i).val = dumpData(newdata(i).filename,newdata(i).val,1);
+        else
+            newdata(i).newdata=newdataMerging(startLevel+1,endLevel,clusters,newdata(i).newdata,data(i).data,c(i).c,dataX_column_size);
+        end 
+    end
+end
+
+function res = maxCorrelated(mOriginal,mtree,count)
+    [row, col] = size(mOriginal);
+    res = zeros(row,col);
+    for i = 1 : col
+        pos = -1;
+        maxcorr = -1;
+        for j = 1 : count
+            if pos==-1
+                pos = j;
+                maxcorr = corr(mtree(j).val(:,i),mOriginal(:,i));
+            else
+                cor = corr(mtree(j).val(:,i),mOriginal(:,i));
+                if maxcorr<cor
+                    pos = j;
+                    maxcorr=cor;
+                end
+            end
+        end
+        res(:,i) = mtree(pos).val(:,i);
+    end
+end
+function flag  = checkClustersMinCount(predicted_labels,clusters,msc)
+    flag = 1 ;          
+    for i = 1:clusters
+        val = find(predicted_labels==i);
+        if size(val)<msc
+            flag = 0;
+        end
+    end
+
+end
+
+function y = dumpData(name2save, internalData, isReturnZero)
+    save(strcat(name2save,'_internal.mat'),'internalData','-v6');
+    if isReturnZero == 1
+        y = 0;
+    else
+        y = internalData;
+    end
+end
+
+function y = loadData(name2load, isReturnSize, isDeleteFile)
+    internal_obj = load(strcat(name2load,'_internal.mat'));
+    if isReturnSize ~= 0
+        y = size(internal_obj.internalData, isReturnSize);
+    else
+        y = internal_obj.internalData;
+    end
+    
+    if  isDeleteFile == 1
+        disp('deleted file')
+        strcat(name2load,'_internal.mat')
+        delete(strcat(name2load,'_internal.mat'));
+    end
+end
+
+function dropall
